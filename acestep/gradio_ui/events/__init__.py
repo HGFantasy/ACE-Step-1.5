@@ -4,6 +4,7 @@ Main entry point for setting up all event handlers
 """
 import gradio as gr
 from typing import Optional
+from loguru import logger
 
 # Import handler modules
 from . import generation_handlers as gen_h

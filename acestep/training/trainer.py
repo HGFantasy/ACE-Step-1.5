@@ -348,6 +348,11 @@ class LoRATrainer:
 
         # Setup with Fabric - only the decoder (which has LoRA)
         self.module.model.decoder, optimizer = self.fabric.setup(self.module.model.decoder, optimizer)
+        
+        # Enable gradient checkpointing to reduce VRAM usage during training
+        if hasattr(self.module.model.decoder, 'gradient_checkpointing_enable'):
+            self.module.model.decoder.gradient_checkpointing_enable()
+            logger.info("Gradient checkpointing enabled for decoder")
         train_loader = self.fabric.setup_dataloaders(train_loader)
 
         # Handle resume from checkpoint (load AFTER Fabric setup)

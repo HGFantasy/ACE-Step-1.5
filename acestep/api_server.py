@@ -41,13 +41,21 @@ except ImportError:  # Optional dependency
     load_dotenv = None  # type: ignore
 
 from fastapi import FastAPI, HTTPException, Request, Depends, Header
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from acestep.handler import AceStepHandler
 from acestep.llm_inference import LLMHandler
 from acestep.constants import (
     DEFAULT_DIT_INSTRUCTION,
+    TASK_TYPES,
+    BPM_MIN,
+    BPM_MAX,
+    DURATION_MIN,
+    DURATION_MAX,
     DEFAULT_LM_INSTRUCTION,
     TASK_INSTRUCTIONS,
 )
@@ -512,6 +520,80 @@ class GenerateMusicRequest(BaseModel):
     allow_lm_batch: bool = True
 
     lm_temperature: float = 0.85
+
+    @field_validator("prompt", "lyrics", "sample_query")
+    @classmethod
+    def validate_string_length(cls, v: str) -> str:
+        """Validate string fields have reasonable length limits."""
+        max_length = 10000  # Reasonable limit for prompts/lyrics
+        if len(v) > max_length:
+            raise ValueError(f"String length exceeds maximum of {max_length} characters")
+        return v
+
+    @field_validator("inference_steps")
+    @classmethod
+    def validate_inference_steps(cls, v: int) -> int:
+        """Validate inference_steps is in valid range."""
+        if v < 1 or v > 50:
+            raise ValueError("inference_steps must be between 1 and 50")
+        return v
+
+    @field_validator("bpm")
+    @classmethod
+    def validate_bpm(cls, v: Optional[int]) -> Optional[int]:
+        """Validate BPM is in valid range."""
+        if v is not None and (v < BPM_MIN or v > BPM_MAX):
+            raise ValueError(f"BPM must be between {BPM_MIN} and {BPM_MAX}")
+        return v
+
+    @field_validator("audio_duration")
+    @classmethod
+    def validate_audio_duration(cls, v: Optional[float]) -> Optional[float]:
+        """Validate audio_duration is in valid range."""
+        if v is not None and (v < DURATION_MIN or v > DURATION_MAX):
+            raise ValueError(f"audio_duration must be between {DURATION_MIN} and {DURATION_MAX} seconds")
+        return v
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_task_type(cls, v: str) -> str:
+        """Validate task_type is a valid value."""
+        if v not in TASK_TYPES:
+            raise ValueError(f"task_type must be one of {TASK_TYPES}")
+        return v
+
+    @field_validator("infer_method")
+    @classmethod
+    def validate_infer_method(cls, v: str) -> str:
+        """Validate infer_method is 'ode' or 'sde'."""
+        if v not in ("ode", "sde"):
+            raise ValueError("infer_method must be 'ode' or 'sde'")
+        return v
+
+    @field_validator("audio_format")
+    @classmethod
+    def validate_audio_format(cls, v: str) -> str:
+        """Validate audio_format is a supported format."""
+        valid_formats = ("mp3", "wav", "flac")
+        if v.lower() not in valid_formats:
+            raise ValueError(f"audio_format must be one of {valid_formats}")
+        return v.lower()
+
+    @field_validator("shift")
+    @classmethod
+    def validate_shift(cls, v: float) -> float:
+        """Validate shift is in valid range."""
+        if v < 1.0 or v > 5.0:
+            raise ValueError("shift must be between 1.0 and 5.0")
+        return v
+
+    @field_validator("repainting_start", "repainting_end")
+    @classmethod
+    def validate_repainting_times(cls, v: Optional[float]) -> Optional[float]:
+        """Validate repainting times are non-negative."""
+        if v is not None and v < 0:
+            raise ValueError("repainting times must be non-negative")
+        return v
     lm_cfg_scale: float = 2.5
     lm_top_k: Optional[int] = None
     lm_top_p: Optional[float] = 0.9
@@ -871,11 +953,27 @@ def create_app() -> FastAPI:
             stacklevel=2,
         )
 
-    QUEUE_MAXSIZE = int(os.getenv("ACESTEP_QUEUE_MAXSIZE", "200"))
-    WORKER_COUNT = int(os.getenv("ACESTEP_QUEUE_WORKERS", "1"))  # Single GPU recommended
+    # Validate and parse environment variables with bounds checking
+    queue_maxsize_str = os.getenv("ACESTEP_QUEUE_MAXSIZE", "200")
+    try:
+        QUEUE_MAXSIZE = max(1, int(queue_maxsize_str))
+    except ValueError:
+        QUEUE_MAXSIZE = 200
+    
+    worker_count_str = os.getenv("ACESTEP_QUEUE_WORKERS", "1")
+    try:
+        WORKER_COUNT = max(1, int(worker_count_str))
+    except ValueError:
+        WORKER_COUNT = 1
 
-    INITIAL_AVG_JOB_SECONDS = float(os.getenv("ACESTEP_AVG_JOB_SECONDS", "5.0"))
-    AVG_WINDOW = int(os.getenv("ACESTEP_AVG_WINDOW", "50"))
+    try:
+        INITIAL_AVG_JOB_SECONDS = max(0.1, float(os.getenv("ACESTEP_AVG_JOB_SECONDS", "5.0")))
+    except ValueError:
+        INITIAL_AVG_JOB_SECONDS = 5.0
+    try:
+        AVG_WINDOW = max(1, int(os.getenv("ACESTEP_AVG_WINDOW", "50")))
+    except ValueError:
+        AVG_WINDOW = 50
 
     def _path_to_audio_url(path: str) -> str:
         """Convert local file path to downloadable relative URL"""
@@ -890,14 +988,46 @@ def create_app() -> FastAPI:
         """Validate user-supplied audio input path to prevent path traversal."""
         if not path:
             return None
+        
+        # Resolve to absolute path to handle symlinks and relative paths
         resolved = os.path.realpath(path)
-        # Only allow files that actually exist and have audio extensions
+        
+        # Only allow files that actually exist
         if not os.path.isfile(resolved):
             return None
+        
+        # Check file extension
         ext = os.path.splitext(resolved)[1].lower()
         allowed_extensions = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".opus"}
         if ext not in allowed_extensions:
             return None
+        
+        # Additional security: ensure path is within allowed directories
+        # Only allow files in specific output/data directories, NOT the whole project root
+        project_root = _get_project_root()
+        allowed_dirs = [
+            os.path.join(project_root, "gradio_outputs"),
+            os.path.join(project_root, "checkpoints"),
+            tempfile.gettempdir(),
+        ]
+        
+        # Check if resolved path is within any allowed directory
+        path_allowed = False
+        for allowed_dir in allowed_dirs:
+            allowed_dir_resolved = os.path.realpath(allowed_dir)
+            try:
+                # Use commonpath to check if resolved path is within allowed directory
+                common = os.path.commonpath([resolved, allowed_dir_resolved])
+                if common == allowed_dir_resolved:
+                    path_allowed = True
+                    break
+            except ValueError:
+                # Paths on different drives (Windows) or invalid paths
+                continue
+        
+        if not path_allowed:
+            return None
+        
         return resolved
 
     @asynccontextmanager
@@ -1832,11 +1962,16 @@ def create_app() -> FastAPI:
             executor.shutdown(wait=False, cancel_futures=True)
 
     app = FastAPI(title="ACE-Step API", version="1.0", lifespan=lifespan)
+    
+    # Initialize rate limiter
+    limiter = Limiter(key_func=get_remote_address)
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
     from starlette.middleware.cors import CORSMiddleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=os.getenv("ACESTEP_CORS_ORIGINS", "").split(",") if os.getenv("ACESTEP_CORS_ORIGINS") else [],
+        allow_origins=[o.strip() for o in os.getenv("ACESTEP_CORS_ORIGINS", "").split(",") if o.strip()] if os.getenv("ACESTEP_CORS_ORIGINS") else [],
         allow_credentials=True,
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
@@ -1856,7 +1991,9 @@ def create_app() -> FastAPI:
             avg = float(getattr(app.state, "avg_job_seconds", INITIAL_AVG_JOB_SECONDS))
         return pos * avg
 
-    @app.post("/release_task")
+    @app.post("/v1/release_task")
+    @app.post("/release_task")  # Backward compatibility
+    @limiter.limit("30/minute")  # Rate limit: 30 requests per minute per IP
     async def create_music_generate_job(request: Request, authorization: Optional[str] = Header(None)):
         content_type = (request.headers.get("content-type") or "").lower()
         temp_files: list[str] = []
@@ -2029,7 +2166,9 @@ def create_app() -> FastAPI:
         await q.put((rec.job_id, req))
         return _wrap_response({"task_id": rec.job_id, "status": "queued", "queue_position": position})
 
-    @app.post("/query_result")
+    @app.post("/v1/query_result")
+    @app.post("/query_result")  # Backward compatibility
+    @limiter.limit("60/minute")  # Rate limit: 60 requests per minute per IP
     async def query_result(request: Request, authorization: Optional[str] = Header(None)):
         """Batch query job results"""
         content_type = (request.headers.get("content-type") or "").lower()
@@ -2140,8 +2279,10 @@ def create_app() -> FastAPI:
 
         return _wrap_response(data_list)
 
-    @app.get("/health")
-    async def health_check():
+    @app.get("/v1/health")
+    @app.get("/health")  # Backward compatibility
+    @limiter.limit("120/minute")  # Rate limit: 120 requests per minute per IP
+    async def health_check(request: Request):
         """Health check endpoint for service status."""
         return _wrap_response({
             "status": "ok",
@@ -2150,7 +2291,8 @@ def create_app() -> FastAPI:
         })
 
     @app.get("/v1/stats")
-    async def get_stats(_: None = Depends(verify_api_key)):
+    @limiter.limit("60/minute")  # Rate limit: 60 requests per minute per IP
+    async def get_stats(request: Request, _: None = Depends(verify_api_key)):
         """Get server statistics including job store stats."""
         job_stats = store.get_stats()
         async with app.state.stats_lock:
@@ -2163,7 +2305,8 @@ def create_app() -> FastAPI:
         })
 
     @app.get("/v1/models")
-    async def list_models(_: None = Depends(verify_api_key)):
+    @limiter.limit("60/minute")  # Rate limit: 60 requests per minute per IP
+    async def list_models(request: Request, _: None = Depends(verify_api_key)):
         """List available DiT models."""
         models = []
         
@@ -2199,7 +2342,9 @@ def create_app() -> FastAPI:
             "default_model": models[0]["name"] if models else None,
         })
 
-    @app.post("/create_random_sample")
+    @app.post("/v1/create_random_sample")
+    @app.post("/create_random_sample")  # Backward compatibility
+    @limiter.limit("20/minute")  # Rate limit: 20 requests per minute per IP
     async def create_random_sample_endpoint(request: Request, authorization: Optional[str] = Header(None)):
         """
         Get random sample parameters from pre-loaded example data.
@@ -2228,7 +2373,9 @@ def create_app() -> FastAPI:
         random_example = random.choice(example_data)
         return _wrap_response(random_example)
 
-    @app.post("/format_input")
+    @app.post("/v1/format_input")
+    @app.post("/format_input")  # Backward compatibility
+    @limiter.limit("30/minute")  # Rate limit: 30 requests per minute per IP
     async def format_input_endpoint(request: Request, authorization: Optional[str] = Header(None)):
         """
         Format and enhance lyrics/caption via LLM.
@@ -2363,7 +2510,8 @@ def create_app() -> FastAPI:
             return _wrap_response(None, code=500, error=f"format_sample error: {str(e)}")
 
     @app.get("/v1/audio")
-    async def get_audio(path: str, _: None = Depends(verify_api_key)):
+    @limiter.limit("100/minute")  # Rate limit: 100 requests per minute per IP
+    async def get_audio(request: Request, path: str, _: None = Depends(verify_api_key)):
         """Serve audio file by path."""
         from fastapi.responses import FileResponse
 

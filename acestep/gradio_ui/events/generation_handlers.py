@@ -8,6 +8,7 @@ import random
 import glob
 import gradio as gr
 from typing import Optional, List, Tuple
+from loguru import logger
 from acestep.constants import (
     TASK_TYPES_TURBO,
     TASK_TYPES_BASE,
@@ -123,7 +124,8 @@ def load_metadata(file_obj, llm_handler=None):
         if bpm_value is not None and bpm_value != "N/A":
             try:
                 bpm = int(bpm_value) if bpm_value else None
-            except:
+            except (ValueError, TypeError) as e:
+                logger.debug(f"Failed to parse BPM: {bpm_value}, error: {e}")
                 bpm = None
         else:
             bpm = None
@@ -138,7 +140,8 @@ def load_metadata(file_obj, llm_handler=None):
                 audio_duration = float(duration_value)
                 # Clamp duration to GPU memory limit
                 audio_duration = clamp_duration_to_gpu_limit(audio_duration, llm_handler)
-            except:
+            except (ValueError, TypeError) as e:
+                logger.debug(f"Failed to parse duration: {duration_value}, error: {e}")
                 audio_duration = -1
         else:
             audio_duration = -1
@@ -309,7 +312,7 @@ def sample_example_smart(llm_handler, task_type: str, constrained_decoding_debug
         Tuple of (caption, lyrics, think, bpm, duration, keyscale, language, timesignature) for updating UI components
     """
     # Check if LM is initialized
-    if llm_handler.llm_initialized:
+    if llm_handler is not None and llm_handler.llm_initialized:
         # Use LM to generate example via understand_music API
         try:
             result = understand_music(
@@ -963,8 +966,13 @@ def handle_format_sample(
     user_metadata = {}
     if bpm is not None and bpm > 0:
         user_metadata['bpm'] = int(bpm)
-    if audio_duration is not None and float(audio_duration) > 0:
-        user_metadata['duration'] = int(audio_duration)
+    if audio_duration is not None:
+        try:
+            dur_float = float(audio_duration)
+            if dur_float > 0:
+                user_metadata['duration'] = int(dur_float)
+        except (ValueError, TypeError) as e:
+            logger.debug(f"Failed to parse audio_duration: {audio_duration}, error: {e}")
     if key_scale and key_scale.strip():
         user_metadata['keyscale'] = key_scale.strip()
     if time_signature and time_signature.strip():

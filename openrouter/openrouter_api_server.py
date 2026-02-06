@@ -31,9 +31,12 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Load .env file from project root
-from dotenv import load_dotenv
-_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(_project_root, ".env"))
+try:
+    from dotenv import load_dotenv
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    load_dotenv(os.path.join(_project_root, ".env"))
+except ImportError:
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -535,7 +538,7 @@ def create_app() -> FastAPI:
     from starlette.middleware.cors import CORSMiddleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=os.getenv("ACESTEP_CORS_ORIGINS", "").split(",") if os.getenv("ACESTEP_CORS_ORIGINS") else [],
+        allow_origins=[o.strip() for o in os.getenv("ACESTEP_CORS_ORIGINS", "").split(",") if o.strip()] if os.getenv("ACESTEP_CORS_ORIGINS") else [],
         allow_credentials=True,
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
