@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import hmac
 import json
 import os
 import random
@@ -300,7 +301,7 @@ def verify_token_from_request(body: dict, authorization: Optional[str] = None) -
     # Try ai_token from body first
     ai_token = body.get("ai_token") if body else None
     if ai_token:
-        if ai_token == _api_key:
+        if hmac.compare_digest(ai_token, _api_key):
             return ai_token
         raise HTTPException(status_code=401, detail="Invalid ai_token")
 
@@ -310,7 +311,7 @@ def verify_token_from_request(body: dict, authorization: Optional[str] = None) -
             token = authorization[7:]
         else:
             token = authorization
-        if token == _api_key:
+        if hmac.compare_digest(token, _api_key):
             return token
         raise HTTPException(status_code=401, detail="Invalid API key")
 
@@ -332,7 +333,7 @@ async def verify_api_key(authorization: Optional[str] = Header(None)):
     else:
         token = authorization
 
-    if token != _api_key:
+    if not hmac.compare_digest(token, _api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 # Parameter aliases for request parsing
@@ -862,6 +863,14 @@ def create_app() -> FastAPI:
     api_key = os.getenv("ACESTEP_API_KEY", None)
     set_api_key(api_key)
 
+    if api_key is None:
+        import warnings
+        warnings.warn(
+            "⚠️  SECURITY WARNING: No API key configured. All endpoints are publicly accessible. "
+            "Set ACESTEP_API_KEY environment variable or use --api-key to enable authentication.",
+            stacklevel=2,
+        )
+
     QUEUE_MAXSIZE = int(os.getenv("ACESTEP_QUEUE_MAXSIZE", "200"))
     WORKER_COUNT = int(os.getenv("ACESTEP_QUEUE_WORKERS", "1"))  # Single GPU recommended
 
@@ -876,6 +885,20 @@ def create_app() -> FastAPI:
             return path
         encoded_path = urllib.parse.quote(path, safe="")
         return f"/v1/audio?path={encoded_path}"
+
+    def _validate_audio_input_path(path: Optional[str]) -> Optional[str]:
+        """Validate user-supplied audio input path to prevent path traversal."""
+        if not path:
+            return None
+        resolved = os.path.realpath(path)
+        # Only allow files that actually exist and have audio extensions
+        if not os.path.isfile(resolved):
+            return None
+        ext = os.path.splitext(resolved)[1].lower()
+        allowed_extensions = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".opus"}
+        if ext not in allowed_extensions:
+            return None
+        return resolved
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -1505,7 +1528,8 @@ def create_app() -> FastAPI:
                 error_traceback = traceback.format_exc()
                 print(f"[API Server] Job {job_id} FAILED: {e}")
                 print(f"[API Server] Traceback:\n{error_traceback}")
-                job_store.mark_failed(job_id, error_traceback)
+                # Security: only expose error summary to API clients, not full traceback
+                job_store.mark_failed(job_id, str(e))
 
                 # Update local cache
                 _update_local_cache(job_id, None, "failed")
@@ -1809,6 +1833,15 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="ACE-Step API", version="1.0", lifespan=lifespan)
 
+    from starlette.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=os.getenv("ACESTEP_CORS_ORIGINS", "").split(",") if os.getenv("ACESTEP_CORS_ORIGINS") else [],
+        allow_credentials=True,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
+
     async def _queue_position(job_id: str) -> int:
         async with app.state.pending_lock:
             try:
@@ -1908,13 +1941,13 @@ def create_app() -> FastAPI:
                 reference_audio_path = await _save_upload_to_temp(ref_up, prefix="ref_audio")
                 temp_files.append(reference_audio_path)
             else:
-                reference_audio_path = str(form.get("ref_audio_path") or form.get("reference_audio_path") or "").strip() or None
+                reference_audio_path = _validate_audio_input_path(str(form.get("ref_audio_path") or form.get("reference_audio_path") or "").strip() or None)
 
             if isinstance(ctx_up, StarletteUploadFile):
                 src_audio_path = await _save_upload_to_temp(ctx_up, prefix="ctx_audio")
                 temp_files.append(src_audio_path)
             else:
-                src_audio_path = str(form.get("ctx_audio_path") or form.get("src_audio_path") or "").strip() or None
+                src_audio_path = _validate_audio_input_path(str(form.get("ctx_audio_path") or form.get("src_audio_path") or "").strip() or None)
 
             req = _build_request(
                 RequestParser(dict(form)),
@@ -1926,8 +1959,8 @@ def create_app() -> FastAPI:
             form = await request.form()
             form_dict = dict(form)
             verify_token_from_request(form_dict, authorization)
-            reference_audio_path = str(form.get("ref_audio_path") or form.get("reference_audio_path") or "").strip() or None
-            src_audio_path = str(form.get("ctx_audio_path") or form.get("src_audio_path") or "").strip() or None
+            reference_audio_path = _validate_audio_input_path(str(form.get("ref_audio_path") or form.get("reference_audio_path") or "").strip() or None)
+            src_audio_path = _validate_audio_input_path(str(form.get("ctx_audio_path") or form.get("src_audio_path") or "").strip() or None)
             req = _build_request(
                 RequestParser(form_dict),
                 reference_audio_path=reference_audio_path,
@@ -1958,8 +1991,8 @@ def create_app() -> FastAPI:
                 parsed = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
                 flat = {k: (v[0] if isinstance(v, list) and v else v) for k, v in parsed.items()}
                 verify_token_from_request(flat, authorization)
-                reference_audio_path = str(flat.get("ref_audio_path") or flat.get("reference_audio_path") or "").strip() or None
-                src_audio_path = str(flat.get("ctx_audio_path") or flat.get("src_audio_path") or "").strip() or None
+                reference_audio_path = _validate_audio_input_path(str(flat.get("ref_audio_path") or flat.get("reference_audio_path") or "").strip() or None)
+                src_audio_path = _validate_audio_input_path(str(flat.get("ctx_audio_path") or flat.get("src_audio_path") or "").strip() or None)
                 req = _build_request(
                     RequestParser(flat),
                     reference_audio_path=reference_audio_path,
@@ -2334,10 +2367,20 @@ def create_app() -> FastAPI:
         """Serve audio file by path."""
         from fastapi.responses import FileResponse
 
-        if not os.path.exists(path):
-            raise HTTPException(status_code=404, detail=f"Audio file not found: {path}")
+        # Security: resolve path and validate it's within allowed directory
+        resolved = os.path.realpath(path)
+        allowed_dir = os.path.realpath(app.state.temp_audio_dir)
+        if not resolved.startswith(allowed_dir + os.sep) and resolved != allowed_dir:
+            raise HTTPException(status_code=403, detail="Access denied: path outside allowed directory")
 
-        ext = os.path.splitext(path)[1].lower()
+        if not os.path.isfile(resolved):
+            raise HTTPException(status_code=404, detail="Audio file not found")
+
+        ext = os.path.splitext(resolved)[1].lower()
+        allowed_extensions = {".mp3", ".wav", ".flac", ".ogg"}
+        if ext not in allowed_extensions:
+            raise HTTPException(status_code=403, detail="Access denied: unsupported file type")
+
         media_types = {
             ".mp3": "audio/mpeg",
             ".wav": "audio/wav",
@@ -2346,7 +2389,7 @@ def create_app() -> FastAPI:
         }
         media_type = media_types.get(ext, "audio/mpeg")
 
-        return FileResponse(path, media_type=media_type)
+        return FileResponse(resolved, media_type=media_type)
 
     return app
 

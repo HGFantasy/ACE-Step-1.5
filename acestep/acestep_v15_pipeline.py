@@ -7,28 +7,27 @@ import sys
 
 # Load environment variables from .env file in project root
 # This allows configuration without hardcoding values
-# Falls back to .env.example if .env is not found
 try:
     from dotenv import load_dotenv
     # Get project root directory
     _current_file = os.path.abspath(__file__)
     _project_root = os.path.dirname(os.path.dirname(_current_file))
     _env_path = os.path.join(_project_root, '.env')
-    _env_example_path = os.path.join(_project_root, '.env.example')
     
     if os.path.exists(_env_path):
         load_dotenv(_env_path)
         print(f"Loaded configuration from {_env_path}")
-    elif os.path.exists(_env_example_path):
-        load_dotenv(_env_example_path)
-        print(f"Loaded configuration from {_env_example_path} (fallback)")
+    else:
+        print(f"No .env file found at {_env_path}, using environment defaults")
 except ImportError:
     # python-dotenv not installed, skip loading .env
     pass
 
-# Clear proxy settings that may affect Gradio
-for proxy_var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
-    os.environ.pop(proxy_var, None)
+# Clear proxy settings only if explicitly requested (may affect Gradio networking)
+if os.environ.get('ACESTEP_CLEAR_PROXY', '').lower() in ('1', 'true', 'yes'):
+    for proxy_var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
+        os.environ.pop(proxy_var, None)
+    print("Proxy settings cleared (ACESTEP_CLEAR_PROXY=true)")
 
 try:
     # When executed as a module: `python -m acestep.acestep_v15_pipeline`

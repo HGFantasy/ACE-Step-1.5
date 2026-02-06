@@ -2,6 +2,7 @@
 Gradio API Routes Module
 Add API endpoints compatible with api_server.py and CustomAceStep to Gradio application
 """
+import hmac
 import json
 import os
 import random
@@ -49,7 +50,7 @@ def verify_token_from_request(body: dict, authorization: Optional[str] = None) -
     # Try ai_token from body first
     ai_token = body.get("ai_token") if body else None
     if ai_token:
-        if ai_token == _api_key:
+        if hmac.compare_digest(ai_token, _api_key):
             return ai_token
         raise HTTPException(status_code=401, detail="Invalid ai_token")
 
@@ -59,7 +60,7 @@ def verify_token_from_request(body: dict, authorization: Optional[str] = None) -
             token = authorization[7:]
         else:
             token = authorization
-        if token == _api_key:
+        if hmac.compare_digest(token, _api_key):
             return token
         raise HTTPException(status_code=401, detail="Invalid API key")
 
@@ -81,7 +82,7 @@ async def verify_api_key(authorization: Optional[str] = Header(None)):
     else:
         token = authorization
 
-    if token != _api_key:
+    if not hmac.compare_digest(token, _api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
@@ -200,10 +201,20 @@ async def list_models(request: Request, _: None = Depends(verify_api_key)):
 @router.get("/v1/audio")
 async def get_audio(path: str, _: None = Depends(verify_api_key)):
     """Download audio file"""
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail=f"Audio file not found: {path}")
+    # Security: resolve path and validate it's within allowed directory
+    resolved = os.path.realpath(path)
+    allowed_dir = os.path.realpath(DEFAULT_RESULTS_DIR)
+    if not resolved.startswith(allowed_dir + os.sep) and resolved != allowed_dir:
+        raise HTTPException(status_code=403, detail="Access denied: path outside allowed directory")
 
-    ext = os.path.splitext(path)[1].lower()
+    if not os.path.isfile(resolved):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+
+    ext = os.path.splitext(resolved)[1].lower()
+    allowed_extensions = {".mp3", ".wav", ".flac", ".ogg"}
+    if ext not in allowed_extensions:
+        raise HTTPException(status_code=403, detail="Access denied: unsupported file type")
+
     media_types = {
         ".mp3": "audio/mpeg",
         ".wav": "audio/wav",
@@ -212,7 +223,7 @@ async def get_audio(path: str, _: None = Depends(verify_api_key)):
     }
     media_type = media_types.get(ext, "audio/mpeg")
 
-    return FileResponse(path, media_type=media_type)
+    return FileResponse(resolved, media_type=media_type)
 
 
 @router.post("/create_random_sample")

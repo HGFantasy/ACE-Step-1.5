@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import base64
 import functools
+import hmac
 import json
 import os
 import sys
@@ -87,7 +88,7 @@ async def verify_api_key(authorization: Optional[str] = Header(None)):
     else:
         token = authorization
 
-    if token != _api_key:
+    if not hmac.compare_digest(token, _api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
@@ -529,6 +530,15 @@ def create_app() -> FastAPI:
         version="1.0",
         description="OpenRouter-compatible API for text-to-music generation",
         lifespan=lifespan,
+    )
+
+    from starlette.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=os.getenv("ACESTEP_CORS_ORIGINS", "").split(",") if os.getenv("ACESTEP_CORS_ORIGINS") else [],
+        allow_credentials=True,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
     )
     
     # -------------------------------------------------------------------------
