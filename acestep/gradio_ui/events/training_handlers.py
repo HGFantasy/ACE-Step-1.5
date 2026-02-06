@@ -105,7 +105,8 @@ def auto_label_all(
         if progress:
             try:
                 progress(msg)
-            except:
+            except Exception as e:
+                logger.debug(f"Progress callback failed: {e}")
                 pass
 
     # Label all samples (skip_metas only skips BPM/Key/TimeSig, still generates caption/genre)
@@ -391,7 +392,8 @@ def preprocess_dataset(
         if progress:
             try:
                 progress(msg)
-            except:
+            except Exception as e:
+                logger.debug(f"Progress callback failed: {e}")
                 pass
     
     # Run preprocessing

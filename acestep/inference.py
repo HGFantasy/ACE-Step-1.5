@@ -291,12 +291,12 @@ def _update_metadata_from_lm(
 
 @_get_spaces_gpu_decorator(duration=180)
 def generate_music(
-    dit_handler,
-    llm_handler,
+    dit_handler: Any,  # AceStepHandler
+    llm_handler: Any,  # LLMHandler
     params: GenerationParams,
     config: GenerationConfig,
     save_dir: Optional[str] = None,
-    progress=None,
+    progress: Optional[Any] = None,  # Callable or None
 ) -> GenerationResult:
     """Generate music using ACE-Step model with optional LM reasoning.
     
@@ -531,19 +531,19 @@ def generate_music(
                     vocal_language=dit_input_vocal_language,
                     caption=dit_input_caption,
                     lyrics=dit_input_lyrics)
-                if not params.bpm:
+                if params.bpm is None:
                     params.cot_bpm = bpm
-                if not params.keyscale:
+                if params.keyscale is None:
                     params.cot_keyscale = key_scale
-                if not params.timesignature:
+                if params.timesignature is None:
                     params.cot_timesignature = time_signature
-                if not params.duration:
+                if params.duration is None:
                     params.cot_duration = audio_duration
-                if not params.vocal_language:
+                if params.vocal_language is None:
                     params.cot_vocal_language = vocal_language
-                if not params.caption:
+                if params.caption is None:
                     params.cot_caption = caption
-                if not params.lyrics:
+                if params.lyrics is None:
                     params.cot_lyrics = lyrics
 
             # set cot caption and language if needed

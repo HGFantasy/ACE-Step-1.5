@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import base64
 import functools
+import hmac
 import json
 import os
 import sys
@@ -30,9 +31,12 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Load .env file from project root
-from dotenv import load_dotenv
-_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(_project_root, ".env"))
+try:
+    from dotenv import load_dotenv
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    load_dotenv(os.path.join(_project_root, ".env"))
+except ImportError:
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -87,7 +91,7 @@ async def verify_api_key(authorization: Optional[str] = Header(None)):
     else:
         token = authorization
 
-    if token != _api_key:
+    if not hmac.compare_digest(token, _api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
@@ -529,6 +533,15 @@ def create_app() -> FastAPI:
         version="1.0",
         description="OpenRouter-compatible API for text-to-music generation",
         lifespan=lifespan,
+    )
+
+    from starlette.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in os.getenv("ACESTEP_CORS_ORIGINS", "").split(",") if o.strip()] if os.getenv("ACESTEP_CORS_ORIGINS") else [],
+        allow_credentials=True,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
     )
     
     # -------------------------------------------------------------------------

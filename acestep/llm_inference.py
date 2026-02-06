@@ -2303,7 +2303,8 @@ class LLMHandler:
                     if current_key == 'bpm':
                         try:
                             metadata['bpm'] = int(value.strip())
-                        except:
+                        except (ValueError, TypeError) as e:
+                            logger.debug(f"Failed to parse BPM as int: {value.strip()}, using string value: {e}")
                             metadata['bpm'] = value.strip()
                     elif current_key == 'caption':
                         # Post-process caption to remove YAML multi-line formatting
@@ -2311,7 +2312,8 @@ class LLMHandler:
                     elif current_key == 'duration':
                         try:
                             metadata['duration'] = int(value.strip())
-                        except:
+                        except (ValueError, TypeError) as e:
+                            logger.debug(f"Failed to parse duration as int: {value.strip()}, using string value: {e}")
                             metadata['duration'] = value.strip()
                     elif current_key == 'genres':
                         metadata['genres'] = value.strip()

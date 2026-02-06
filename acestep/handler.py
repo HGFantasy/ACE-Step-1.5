@@ -462,7 +462,7 @@ class AceStepHandler:
                     
                 silence_latent_path = os.path.join(acestep_v15_checkpoint_path, "silence_latent.pt")
                 if os.path.exists(silence_latent_path):
-                    self.silence_latent = torch.load(silence_latent_path).transpose(1, 2)
+                    self.silence_latent = torch.load(silence_latent_path, weights_only=True).transpose(1, 2)
                     # Always keep silence_latent on GPU - it's used in many places outside model context
                     # and is small enough that it won't significantly impact VRAM
                     self.silence_latent = self.silence_latent.to(device).to(self.dtype)
@@ -1632,7 +1632,7 @@ class AceStepHandler:
         for ii, refer_audio_list in enumerate(refer_audios):
             if isinstance(refer_audio_list, list):
                 for idx, refer_audio in enumerate(refer_audio_list):
-                    refer_audio_list[idx] = refer_audio_list[idx].to(self.device).to(torch.bfloat16)
+                    refer_audio_list[idx] = refer_audio_list[idx].to(self.device).to(self.dtype)
             elif isinstance(refer_audio_list, torch.Tensor):
                 refer_audios[ii] = refer_audios[ii].to(self.device)
         
@@ -2055,7 +2055,8 @@ class AceStepHandler:
 
     def infer_text_embeddings(self, text_token_idss):
         with torch.no_grad():
-            text_embeddings = self.text_encoder(input_ids=text_token_idss, lyric_attention_mask=None).last_hidden_state
+            with torch.autocast(device_type='cuda' if self.device.type == 'cuda' else 'cpu', dtype=torch.bfloat16, enabled=self.device.type == 'cuda'):
+                text_embeddings = self.text_encoder(input_ids=text_token_idss, lyric_attention_mask=None).last_hidden_state
         return text_embeddings
 
     def infer_lyric_embeddings(self, lyric_token_ids):
@@ -2334,24 +2335,27 @@ class AceStepHandler:
             generate_kwargs["timesteps"] = torch.tensor(timesteps, dtype=torch.float32)
         logger.info("[service_generate] Generating audio...")
         with self._load_model_context("model"):
-            # Prepare condition tensors first (for LRC timestamp generation)
-            encoder_hidden_states, encoder_attention_mask, context_latents = self.model.prepare_condition(
-                text_hidden_states=text_hidden_states,
-                text_attention_mask=text_attention_mask,
-                lyric_hidden_states=lyric_hidden_states,
-                lyric_attention_mask=lyric_attention_mask,
-                refer_audio_acoustic_hidden_states_packed=refer_audio_acoustic_hidden_states_packed,
-                refer_audio_order_mask=refer_audio_order_mask,
-                hidden_states=src_latents,
-                attention_mask=torch.ones(src_latents.shape[0], src_latents.shape[1], device=src_latents.device, dtype=src_latents.dtype),
-                silence_latent=self.silence_latent,
-                src_latents=src_latents,
-                chunk_masks=chunk_mask,
-                is_covers=is_covers,
-                precomputed_lm_hints_25Hz=precomputed_lm_hints_25Hz,
-            )
-            
-            outputs = self.model.generate_audio(**generate_kwargs)
+            # Use autocast for mixed precision inference
+            autocast_device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
+            with torch.autocast(device_type=autocast_device_type, dtype=torch.bfloat16, enabled=self.device.type == 'cuda'):
+                # Prepare condition tensors first (for LRC timestamp generation)
+                encoder_hidden_states, encoder_attention_mask, context_latents = self.model.prepare_condition(
+                    text_hidden_states=text_hidden_states,
+                    text_attention_mask=text_attention_mask,
+                    lyric_hidden_states=lyric_hidden_states,
+                    lyric_attention_mask=lyric_attention_mask,
+                    refer_audio_acoustic_hidden_states_packed=refer_audio_acoustic_hidden_states_packed,
+                    refer_audio_order_mask=refer_audio_order_mask,
+                    hidden_states=src_latents,
+                    attention_mask=torch.ones(src_latents.shape[0], src_latents.shape[1], device=src_latents.device, dtype=src_latents.dtype),
+                    silence_latent=self.silence_latent,
+                    src_latents=src_latents,
+                    chunk_masks=chunk_mask,
+                    is_covers=is_covers,
+                    precomputed_lm_hints_25Hz=precomputed_lm_hints_25Hz,
+                )
+                
+                outputs = self.model.generate_audio(**generate_kwargs)
         
         # Add intermediate information to outputs for extra_outputs
         outputs["src_latents"] = src_latents
@@ -2384,7 +2388,9 @@ class AceStepHandler:
         # If short enough, decode directly
         if T <= chunk_size:
             # Decode and immediately extract .sample to avoid keeping DecoderOutput object
-            decoder_output = self.vae.decode(latents)
+            autocast_device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
+            with torch.autocast(device_type=autocast_device_type, dtype=torch.bfloat16, enabled=self.device.type == 'cuda'):
+                decoder_output = self.vae.decode(latents)
             result = decoder_output.sample
             del decoder_output
             return result
@@ -2420,9 +2426,11 @@ class AceStepHandler:
             # Extract chunk
             latent_chunk = latents[:, :, win_start:win_end]
             
-            # Decode
+            # Decode with autocast for mixed precision
             # [Batch, Channels, AudioSamples]
-            decoder_output = self.vae.decode(latent_chunk)
+            autocast_device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
+            with torch.autocast(device_type=autocast_device_type, dtype=torch.bfloat16, enabled=self.device.type == 'cuda'):
+                decoder_output = self.vae.decode(latent_chunk)
             audio_chunk = decoder_output.sample
             del decoder_output
             
@@ -2459,7 +2467,9 @@ class AceStepHandler:
         first_win_end = min(T, first_core_end + overlap)
         
         first_latent_chunk = latents[:, :, first_win_start:first_win_end]
-        first_decoder_output = self.vae.decode(first_latent_chunk)
+        autocast_device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
+        with torch.autocast(device_type=autocast_device_type, dtype=torch.bfloat16, enabled=self.device.type == 'cuda'):
+            first_decoder_output = self.vae.decode(first_latent_chunk)
         first_audio_chunk = first_decoder_output.sample
         del first_decoder_output
         
@@ -2497,9 +2507,10 @@ class AceStepHandler:
             # Extract chunk
             latent_chunk = latents[:, :, win_start:win_end]
             
-            # Decode on GPU
+            # Decode on GPU with autocast for mixed precision
             # [Batch, Channels, AudioSamples]
-            decoder_output = self.vae.decode(latent_chunk)
+            with torch.autocast(device_type=autocast_device_type, dtype=torch.bfloat16, enabled=self.device.type == 'cuda'):
+                decoder_output = self.vae.decode(latent_chunk)
             audio_chunk = decoder_output.sample
             del decoder_output
             
@@ -2922,7 +2933,9 @@ class AceStepHandler:
                         logger.info("[generate_music] Using tiled VAE decode to reduce VRAM usage...")
                         pred_wavs = self.tiled_decode(pred_latents_for_decode)  # [batch, channels, samples]
                     else:
-                        decoder_output = self.vae.decode(pred_latents_for_decode)
+                        autocast_device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
+                        with torch.autocast(device_type=autocast_device_type, dtype=torch.bfloat16, enabled=self.device.type == 'cuda'):
+                            decoder_output = self.vae.decode(pred_latents_for_decode)
                         pred_wavs = decoder_output.sample
                         del decoder_output
                     

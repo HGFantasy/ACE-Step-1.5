@@ -4,31 +4,41 @@ Handler wrapper connecting model and UI
 """
 import os
 import sys
+from typing import Optional, Dict, Any
+from loguru import logger
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse boolean environment variable."""
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+
 
 # Load environment variables from .env file in project root
 # This allows configuration without hardcoding values
-# Falls back to .env.example if .env is not found
 try:
     from dotenv import load_dotenv
     # Get project root directory
     _current_file = os.path.abspath(__file__)
     _project_root = os.path.dirname(os.path.dirname(_current_file))
     _env_path = os.path.join(_project_root, '.env')
-    _env_example_path = os.path.join(_project_root, '.env.example')
     
     if os.path.exists(_env_path):
         load_dotenv(_env_path)
-        print(f"Loaded configuration from {_env_path}")
-    elif os.path.exists(_env_example_path):
-        load_dotenv(_env_example_path)
-        print(f"Loaded configuration from {_env_example_path} (fallback)")
+        logger.info(f"Loaded configuration from {_env_path}")
+    else:
+        logger.debug(f"No .env file found at {_env_path}, using environment defaults")
 except ImportError:
     # python-dotenv not installed, skip loading .env
     pass
 
-# Clear proxy settings that may affect Gradio
-for proxy_var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
-    os.environ.pop(proxy_var, None)
+# Clear proxy settings only if explicitly requested (may affect Gradio networking)
+if os.environ.get('ACESTEP_CLEAR_PROXY', '').lower() in ('1', 'true', 'yes'):
+    for proxy_var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
+        os.environ.pop(proxy_var, None)
+    logger.info("Proxy settings cleared (ACESTEP_CLEAR_PROXY=true)")
 
 try:
     # When executed as a module: `python -m acestep.acestep_v15_pipeline`
@@ -49,7 +59,7 @@ except ImportError:
     from acestep.gpu_config import get_gpu_config, get_gpu_memory_gb, print_gpu_config_info, set_global_gpu_config
 
 
-def create_demo(init_params=None, language='en'):
+def create_demo(init_params: Optional[Dict[str, Any]] = None, language: str = 'en') -> Any:  # Returns gradio.Blocks
     """
     Create Gradio demo interface
     
@@ -93,26 +103,26 @@ def main():
     gpu_memory_gb = gpu_config.gpu_memory_gb
     auto_offload = gpu_memory_gb > 0 and gpu_memory_gb < 16
     
-    # Print GPU configuration info
-    print(f"\n{'='*60}")
-    print("GPU Configuration Detected:")
-    print(f"{'='*60}")
-    print(f"  GPU Memory: {gpu_memory_gb:.2f} GB")
-    print(f"  Configuration Tier: {gpu_config.tier}")
-    print(f"  Max Duration (with LM): {gpu_config.max_duration_with_lm}s ({gpu_config.max_duration_with_lm // 60} min)")
-    print(f"  Max Duration (without LM): {gpu_config.max_duration_without_lm}s ({gpu_config.max_duration_without_lm // 60} min)")
-    print(f"  Max Batch Size (with LM): {gpu_config.max_batch_size_with_lm}")
-    print(f"  Max Batch Size (without LM): {gpu_config.max_batch_size_without_lm}")
-    print(f"  Default LM Init: {gpu_config.init_lm_default}")
-    print(f"  Available LM Models: {gpu_config.available_lm_models or 'None'}")
-    print(f"{'='*60}\n")
+    # Log GPU configuration info
+    logger.info(f"\n{'='*60}")
+    logger.info("GPU Configuration Detected:")
+    logger.info(f"{'='*60}")
+    logger.info(f"  GPU Memory: {gpu_memory_gb:.2f} GB")
+    logger.info(f"  Configuration Tier: {gpu_config.tier}")
+    logger.info(f"  Max Duration (with LM): {gpu_config.max_duration_with_lm}s ({gpu_config.max_duration_with_lm // 60} min)")
+    logger.info(f"  Max Duration (without LM): {gpu_config.max_duration_without_lm}s ({gpu_config.max_duration_without_lm // 60} min)")
+    logger.info(f"  Max Batch Size (with LM): {gpu_config.max_batch_size_with_lm}")
+    logger.info(f"  Max Batch Size (without LM): {gpu_config.max_batch_size_without_lm}")
+    logger.info(f"  Default LM Init: {gpu_config.init_lm_default}")
+    logger.info(f"  Available LM Models: {gpu_config.available_lm_models or 'None'}")
+    logger.info(f"{'='*60}\n")
     
     if auto_offload:
-        print(f"Auto-enabling CPU offload (GPU < 16GB)")
+        logger.info(f"Auto-enabling CPU offload (GPU < 16GB)")
     elif gpu_memory_gb > 0:
-        print(f"CPU offload disabled by default (GPU >= 16GB)")
+        logger.info(f"CPU offload disabled by default (GPU >= 16GB)")
     else:
-        print("No GPU detected, running on CPU")
+        logger.info("No GPU detected, running on CPU")
 
     # Define local outputs directory
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -120,7 +130,7 @@ def main():
     # Normalize path to use forward slashes for Gradio 6 compatibility on Windows
     output_dir = output_dir.replace("\\", "/")
     os.makedirs(output_dir, exist_ok=True)
-    print(f"Output directory: {output_dir}")
+    logger.info(f"Output directory: {output_dir}")
 
     parser = argparse.ArgumentParser(description="Gradio Demo for ACE-Step V1.5")
     parser.add_argument("--port", type=int, default=7860, help="Port to run the gradio server on")
@@ -169,7 +179,7 @@ def main():
 
     # Service mode defaults (can be configured via .env file)
     if args.service_mode:
-        print("Service mode enabled - applying preset configurations...")
+        logger.info("Service mode enabled - applying preset configurations...")
         # Force init_service in service mode
         args.init_service = True
         # Default DiT model for service mode (from env or fallback)
@@ -186,9 +196,9 @@ def main():
             )
         # Backend for service mode (from env or fallback to vllm)
         args.backend = os.environ.get("SERVICE_MODE_BACKEND", "vllm")
-        print(f"  DiT model: {args.config_path}")
-        print(f"  LM model: {args.lm_model_path}")
-        print(f"  Backend: {args.backend}")
+        logger.info(f"  DiT model: {args.config_path}")
+        logger.info(f"  LM model: {args.lm_model_path}")
+        logger.info(f"  Backend: {args.backend}")
     
     try:
         init_params = None
@@ -197,7 +207,7 @@ def main():
 
         # If init_service is True, perform initialization before creating UI
         if args.init_service:
-            print("Initializing service from command line...")
+            logger.info("Initializing service from command line...")
             
             # Create handler instances for initialization
             dit_handler = AceStepHandler()
@@ -208,9 +218,9 @@ def main():
                 available_models = dit_handler.get_available_acestep_v15_models()
                 if available_models:
                     args.config_path = "acestep-v15-turbo" if "acestep-v15-turbo" in available_models else available_models[0]
-                    print(f"Auto-selected config_path: {args.config_path}")
+                    logger.info(f"Auto-selected config_path: {args.config_path}")
                 else:
-                    print("Error: No available models found. Please specify --config_path", file=sys.stderr)
+                    logger.error("No available models found. Please specify --config_path")
                     sys.exit(1)
             
             # Get project root (same logic as in handler)
@@ -226,32 +236,34 @@ def main():
             prefer_source = None
             if args.download_source and args.download_source != "auto":
                 prefer_source = args.download_source
-                print(f"Using preferred download source: {prefer_source}")
+                logger.info(f"Using preferred download source: {prefer_source}")
 
             # Initialize DiT handler
-            print(f"Initializing DiT model: {args.config_path} on {args.device}...")
+            logger.info(f"Initializing DiT model: {args.config_path} on {args.device}...")
+            # torch.compile opt-in via env var (default: off due to compilation overhead on first run)
+            compile_model = _env_bool("ACESTEP_COMPILE_MODEL", False)
             init_status, enable_generate = dit_handler.initialize_service(
                 project_root=project_root,
                 config_path=args.config_path,
                 device=args.device,
                 use_flash_attention=use_flash_attention,
-                compile_model=False,
+                compile_model=compile_model,
                 offload_to_cpu=args.offload_to_cpu,
                 offload_dit_to_cpu=args.offload_dit_to_cpu,
                 prefer_source=prefer_source
             )
             
             if not enable_generate:
-                print(f"Error initializing DiT model: {init_status}", file=sys.stderr)
+                logger.error(f"Error initializing DiT model: {init_status}")
                 sys.exit(1)
             
-            print(f"DiT model initialized successfully")
+            logger.info(f"DiT model initialized successfully")
             
             # Initialize LM handler if requested
             # Auto-determine init_llm based on GPU config if not explicitly set
             if args.init_llm is None:
                 args.init_llm = gpu_config.init_lm_default
-                print(f"Auto-setting init_llm to {args.init_llm} based on GPU configuration")
+                logger.info(f"Auto-setting init_llm to {args.init_llm} based on GPU configuration")
             
             lm_status = ""
             if args.init_llm:
@@ -260,14 +272,14 @@ def main():
                     available_lm_models = llm_handler.get_available_5hz_lm_models()
                     if available_lm_models:
                         args.lm_model_path = available_lm_models[0]
-                        print(f"Using default LM model: {args.lm_model_path}")
+                        logger.info(f"Using default LM model: {args.lm_model_path}")
                     else:
-                        print("Warning: No LM models available, skipping LM initialization", file=sys.stderr)
+                        logger.warning("No LM models available, skipping LM initialization")
                         args.init_llm = False
                 
                 if args.init_llm and args.lm_model_path:
                     checkpoint_dir = os.path.join(project_root, "checkpoints")
-                    print(f"Initializing 5Hz LM: {args.lm_model_path} on {args.device}...")
+                    logger.info(f"Initializing 5Hz LM: {args.lm_model_path} on {args.device}...")
                     lm_status, lm_success = llm_handler.initialize(
                         checkpoint_dir=checkpoint_dir,
                         lm_model_path=args.lm_model_path,
@@ -278,10 +290,10 @@ def main():
                     )
                     
                     if lm_success:
-                        print(f"5Hz LM initialized successfully")
+                        logger.info(f"5Hz LM initialized successfully")
                         init_status += f"\n{lm_status}"
                     else:
-                        print(f"Warning: 5Hz LM initialization failed: {lm_status}", file=sys.stderr)
+                        logger.warning(f"5Hz LM initialization failed: {lm_status}")
                         init_status += f"\n{lm_status}"
             
             # Prepare initialization parameters for UI
@@ -306,10 +318,10 @@ def main():
                 'output_dir': output_dir,  # Pass output dir to UI
             }
             
-            print("Service initialization completed successfully!")
+            logger.info("Service initialization completed successfully!")
         
         # Create and launch demo
-        print(f"Creating Gradio interface with language: {args.language}...")
+        logger.info(f"Creating Gradio interface with language: {args.language}...")
         
         # If not using init_service, still pass gpu_config to init_params
         if init_params is None:
@@ -323,24 +335,24 @@ def main():
         
         # Enable queue for multi-user support
         # This ensures proper request queuing and prevents concurrent generation conflicts
-        print("Enabling queue for multi-user support...")
+        logger.info("Enabling queue for multi-user support...")
         demo.queue(
             max_size=20,  # Maximum queue size (adjust based on your needs)
             status_update_rate="auto",  # Update rate for queue status
             default_concurrency_limit=1,  # Prevents VRAM saturation
         )
 
-        print(f"Launching server on {args.server_name}:{args.port}...")
+        logger.info(f"Launching server on {args.server_name}:{args.port}...")
 
         # Setup authentication if provided
         auth = None
         if args.auth_username and args.auth_password:
             auth = (args.auth_username, args.auth_password)
-            print("Authentication enabled")
+            logger.info("Authentication enabled")
 
         # Enable API endpoints if requested
         if args.enable_api:
-            print("Enabling API endpoints...")
+            logger.info("Enabling API endpoints...")
             from acestep.gradio_ui.api_routes import setup_api_routes
 
             # Launch Gradio first with prevent_thread_lock=True
@@ -360,8 +372,8 @@ def main():
             setup_api_routes(demo, dit_handler, llm_handler, api_key=args.api_key)
 
             if args.api_key:
-                print("API authentication enabled")
-            print("API endpoints enabled: /health, /v1/models, /release_task, /query_result, /create_random_sample, /format_lyrics")
+                logger.info("API authentication enabled")
+            logger.info("API endpoints enabled: /health, /v1/models, /release_task, /query_result, /create_random_sample, /format_lyrics")
 
             # Keep the main thread alive
             try:
@@ -369,7 +381,7 @@ def main():
                     import time
                     time.sleep(1)
             except KeyboardInterrupt:
-                print("\nShutting down...")
+                logger.info("\nShutting down...")
         else:
             demo.launch(
                 server_name=args.server_name,
@@ -383,7 +395,7 @@ def main():
                 allowed_paths=[output_dir],  # Fix audio loading on Windows
             )
     except Exception as e:
-        print(f"Error launching Gradio: {e}", file=sys.stderr)
+        logger.error(f"Error launching Gradio: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
